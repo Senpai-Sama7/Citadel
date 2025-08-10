@@ -184,9 +184,6 @@ async def startup_event():
 
 @app.on_event("shutdown")
 async def shutdown_event():
-    global _pgpool
-    if _pgpool:
-        _pgpool.closeall()
     task: asyncio.Task = app.state.task
     task.cancel()
     try:
