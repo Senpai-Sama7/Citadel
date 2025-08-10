@@ -1,4 +1,4 @@
-# The Ciadel
+# The Citadel
 
 This project now features a powerful, self-contained AI agent designed to run directly on your local computer with extensive capabilities. It replaces the previous microservices architecture for a more integrated and user-friendly experience.
 
