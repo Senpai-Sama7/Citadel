@@ -24,7 +24,6 @@ jobs:
         uses: conda-incubator/setup-miniconda@v3
         with:
           python-version: 3.10
-          environment-file: environment.yml
           activate-environment: base
           auto-activate-base: false
 
