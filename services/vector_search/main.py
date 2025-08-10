@@ -1,3 +1,6 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+
 """
 Enhanced Vector Search Microservice
 -----------------------------------
@@ -25,166 +28,118 @@ powerful model and persistent storage for the index.
 - `LOG_LEVEL`: The logging level (e.g., "INFO", "DEBUG").
 """
 
+"""
+Vector Search Service
+---------------------
+
+This service provides vector search capabilities using Redis as a vector database.
+"""
+
 import os
-import json
 import logging
-from typing import List, Optional
+from typing import List, Dict, Any
 
-import faiss
-import numpy as np
 from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 from sentence_transformers import SentenceTransformer
+from redisvl.index import SearchIndex
+from redisvl.query import VectorQuery
 
-# --- Configuration & Logging ---
+# --- Configuration ---
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
-MODEL_NAME = os.getenv("MODEL_NAME", "all-mpnet-base-v2")
-INDEX_PATH = os.getenv("INDEX_PATH", "/data/vector_index")
-FAISS_INDEX_FILE = os.path.join(INDEX_PATH, "index.faiss")
-DOC_IDS_FILE = os.path.join(INDEX_PATH, "doc_ids.json")
+REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379")
+EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "all-MiniLM-L6-v2")
+INDEX_NAME = os.getenv("VECTOR_INDEX_NAME", "vector-index")
+VECTOR_DIMENSION = 384 # Based on the chosen model
 
-logging.basicConfig(
-    level=LOG_LEVEL,
-    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
-)
+logging.basicConfig(level=LOG_LEVEL, format="%(asctime)s | %(levelname)s | %(name)s | %(message)s")
 log = logging.getLogger("vector_search_service")
 
-# --- FastAPI App & Global State ---
-app = FastAPI(title="Enhanced Vector Search Service", version="2.0.0")
-
-# --- Simple API Key middleware (applies to all routes except health/docs) ---
-API_KEY = os.getenv("API_KEY", "")
-from starlette.responses import JSONResponse
-
-@app.middleware("http")
-async def _require_api_key(request, call_next):
-    # allow unauthenticated access to health and docs
-    if request.url.path in {"/health", "/docs", "/openapi.json"} or request.url.path.startswith("/docs"):
-        return await call_next(request)
-    key = request.headers.get("X-API-Key")
-    if not API_KEY or key != API_KEY:
-        return JSONResponse(status_code=403, content={"detail": "Forbidden"})
-    return await call_next(request)
-
-
-
-_model: Optional[SentenceTransformer] = None
-_faiss_index: Optional[faiss.Index] = None
-_doc_ids: List[str] = []
-
-# --- Pydantic Models ---
+# --- Models ---
 class Document(BaseModel):
-    id: str = Field(..., description="Unique identifier for the document.")
-    text: str = Field(..., description="The content of the document.")
+    id: str
+    text: str
+    metadata: Dict[str, Any] = {}
 
-class SearchRequest(BaseModel):
-    query: str = Field(..., description="The text query to search for.")
-    top_k: int = Field(5, ge=1, le=100, description="The number of results to return.")
+class Query(BaseModel):
+    query: str
+    top_k: int = 3
 
-# --- Core Service Logic ---
-def load_model_and_index():
-    """Loads the embedding model and the persisted FAISS index from disk."""
-    global _model, _faiss_index, _doc_ids
+# --- Service Initialization ---
+app = FastAPI(
+    title="Vector Search Service",
+    description="Provides vector embedding and search functionality.",
+    version="1.0.0"
+)
 
+try:
+    log.info(f"Loading sentence transformer model: {EMBEDDING_MODEL}")
+    model = SentenceTransformer(EMBEDDING_MODEL)
+    log.info("Model loaded successfully.")
+except Exception as e:
+    log.critical(f"Failed to load embedding model: {e}", exc_info=True)
+    raise RuntimeError(f"Model loading failed: {e}")
+
+try:
+    log.info(f"Connecting to Redis at {REDIS_URL} and initializing index '{INDEX_NAME}'")
+    index = SearchIndex.from_yaml("services/vector_search/schema.yaml")
+    index.set_client_from_url(REDIS_URL)
+    index.create(overwrite=True)
+    log.info("Redis index created/connected successfully.")
+except Exception as e:
+    log.critical(f"Failed to connect to Redis or create index: {e}", exc_info=True)
+    raise RuntimeError(f"Redis connection failed: {e}")
+
+# --- API Endpoints ---
+@app.post("/index", summary="Index a list of documents")
+async def index_documents(documents: List[Document]):
+    """
+    Generates embeddings for a list of documents and indexes them in Redis.
+    """
     try:
-        log.info(f"Loading sentence-transformer model: {MODEL_NAME}")
-        _model = SentenceTransformer(MODEL_NAME)
-        log.info("Model loaded successfully.")
+        data_to_load = []
+        for doc in documents:
+            vector = model.encode(doc.text).tolist()
+            data_to_load.append({
+                "id": doc.id,
+                "text": doc.text,
+                "vector": vector,
+                **doc.metadata
+            })
+        if data_to_load:
+            index.load(data_to_load, id_field="id")
+            log.info(f"Successfully indexed {len(data_to_load)} documents.")
+        return {"message": f"Successfully indexed {len(data_to_load)} documents."}
     except Exception as e:
-        log.critical(f"Failed to load SentenceTransformer model {MODEL_NAME}: {e}", exc_info=True)
-        raise RuntimeError(f"Embedding model failed to load: {e}")
+        log.error(f"Error indexing documents: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
 
-    os.makedirs(INDEX_PATH, exist_ok=True)
-
-    if os.path.exists(FAISS_INDEX_FILE) and os.path.exists(DOC_IDS_FILE):
-        try:
-            log.info(f"Loading FAISS index from: {FAISS_INDEX_FILE}")
-            _faiss_index = faiss.read_index(FAISS_INDEX_FILE)
-            with open(DOC_IDS_FILE, "r") as f:
-                _doc_ids = json.load(f)
-            log.info(f"Index loaded with {_faiss_index.ntotal} vectors.")
-        except Exception as e:
-            log.error(f"Failed to load existing FAISS index or doc IDs: {e}. Starting with empty index.", exc_info=True)
-            # If loading fails, start with an empty index
-            embedding_dim = _model.get_sentence_embedding_dimension()
-            _faiss_index = faiss.IndexFlatL2(embedding_dim)
-            _doc_ids = []
-    else:
-        log.info("No existing index found. A new one will be created.")
-        embedding_dim = _model.get_sentence_embedding_dimension()
-        _faiss_index = faiss.IndexFlatL2(embedding_dim)
-        _doc_ids = []
-
-def save_index():
-    """Saves the FAISS index and document IDs to disk."""
-    if _faiss_index is not None:
-        try:
-            log.info(f"Saving FAISS index to: {FAISS_INDEX_FILE}")
-            faiss.write_index(_faiss_index, FAISS_INDEX_FILE)
-            with open(DOC_IDS_FILE, "w") as f:
-                json.dump(_doc_ids, f)
-            log.info("Index saved successfully.")
-        except Exception as e:
-            log.error(f"Failed to save FAISS index or doc IDs: {e}", exc_info=True)
-
-# --- FastAPI Lifecycle & Endpoints ---
-@app.on_event("startup")
-def startup_event():
-    load_model_and_index()
-
-@app.post("/index")
-def index_documents(docs: List[Document]):
-    if not docs:
-        log.warning("Index request received with no documents.")
-        raise HTTPException(status_code=400, detail="No documents provided.")
-    if _model is None or _faiss_index is None:
-        log.error("Attempted to index documents before model or index was ready.")
-        raise HTTPException(status_code=503, detail="Index not ready. Model or FAISS index not loaded.")
-
-    texts = [d.text for d in docs]
-    ids = [d.id for d in docs]
-    
+@app.post("/search", summary="Search for similar documents")
+async def search(query: Query):
+    """
+    Searches for documents similar to the query text.
+    """
     try:
-        log.info(f"Indexing {len(texts)} new documents.")
-        embeddings = _model.encode(texts, convert_to_numpy=True, show_progress_bar=False) # show_progress_bar=False for production
-        _faiss_index.add(embeddings.astype("float32"))
-        _doc_ids.extend(ids)
-        
-        save_index()
-        log.info(f"Successfully indexed {len(docs)} documents. Total indexed: {_faiss_index.ntotal}")
-        return {"indexed_count": len(docs), "total_count": _faiss_index.ntotal}
-    except Exception as e:
-        log.error(f"Error during document indexing: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Failed to index documents: {e}")
-
-@app.post("/search")
-def semantic_search(request: SearchRequest):
-    if _faiss_index is None or _faiss_index.ntotal == 0:
-        log.warning("Search request received but no documents have been indexed.")
-        raise HTTPException(status_code=404, detail="No documents have been indexed yet. Please index documents before searching.")
-    if _model is None:
-        log.error("Attempted to search before model was ready.")
-        raise HTTPException(status_code=503, detail="Model not ready. Embedding model not loaded.")
-
-    try:
-        log.info(f"Performing semantic search for query: '{request.query}' (top_k={request.top_k})")
-        query_vector = _model.encode([request.query], convert_to_numpy=True).astype("float32")
-        distances, indices = _faiss_index.search(query_vector, request.top_k)
-
-        results = [
-            {"id": _doc_ids[idx], "score": float(1 - dist)} # Ensure score is float for JSON serialization
-            for dist, idx in zip(distances[0], indices[0])
-            if idx != -1
-        ]
-        log.info(f"Search completed. Found {len(results)} results.")
+        query_embedding = model.encode(query.query).tolist()
+        vector_query = VectorQuery(
+            vector=query_embedding,
+            vector_field_name="vector",
+            num_results=query.top_k,
+            return_fields=["id", "text", "vector_score"]
+        )
+        results = index.query(vector_query)
+        log.info(f"Search for '{query.query}' returned {len(results)} results.")
         return {"results": results}
     except Exception as e:
-        log.error(f"Error during semantic search for query '{request.query}': {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Failed to perform semantic search: {e}")
+        log.error(f"Error during search: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
 
-@app.get("/health")
-def health():
-    model_status = "loaded" if _model else "not loaded"
-    index_status = "loaded" if _faiss_index else "not loaded"
-    indexed_count = len(_doc_ids)
-    return {"status": "ok", "model_status": model_status, "index_status": index_status, "indexed_documents": indexed_count}
+@app.get("/health", summary="Health check endpoint")
+async def health_check():
+    """Provides a basic health check of the service."""
+    try:
+        index.client.ping()
+        return {"status": "ok", "redis_connection": "ok"}
+    except Exception as e:
+        log.error(f"Health check failed: {e}")
+        raise HTTPException(status_code=503, detail="Service Unavailable: Cannot connect to Redis.")
