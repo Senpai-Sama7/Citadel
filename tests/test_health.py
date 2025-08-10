@@ -10,7 +10,7 @@ from services.hierarchical_classification.main import app as hier_app
 
 try:
     from services.rule_engine.main import app as rule_app
-except Exception as exc:  # pragma: no cover - optional dependency
+except ImportError as exc:  # pragma: no cover - optional dependency
     rule_app = pytest.param(
         None, marks=pytest.mark.skip(reason=f"rule_engine import failed: {exc}")
     )
