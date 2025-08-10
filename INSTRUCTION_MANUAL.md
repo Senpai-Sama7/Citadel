@@ -24,7 +24,7 @@ Before you can chat with your agent, you need to set it up. Don't worry, it's si
 2.  **Go to Your Agent's Folder:**
     In the Terminal/Command Prompt, type this command and press Enter:
     ```bash
-    cd /home/donovan/Downloads/Citadel
+cd /path/to/your/Citadel
     ```
     (This command tells your computer to go into the `Citadel` folder.)
 
