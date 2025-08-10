@@ -1,3 +1,6 @@
+#!/usr/-bin/env python
+# -*- coding: utf-8 -*-
+
 """
 Knowledge Graph Micro‑service
 ----------------------------
@@ -12,127 +15,98 @@ Environment variables:
 * `NEO4J_URL` – Bolt URL to connect to (e.g., bolt://neo4j:7687)
 * `NEO4J_USER` – Username for authentication (defaults to 'neo4j')
 * `NEO4J_PASSWORD` – Password for authentication
+
+This service provides an interface to a Neo4j graph database.
 """
 
 import os
-from typing import Any, Dict, Optional
+import logging
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException
-from neo4j import GraphDatabase, basic_auth
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
+from neo4j import AsyncGraphDatabase, exceptions
 
+# --- Configuration ---
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+NEO4J_URL = os.getenv("NEO4J_URL", "bolt://localhost:7687")
+NEO4J_USER = os.getenv("NEO4J_USER", "neo4j")
+NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD", "password")
+
+logging.basicConfig(level=LOG_LEVEL, format="%(asctime)s | %(levelname)s | %(name)s | %(message)s")
+log = logging.getLogger("knowledge_graph_service")
+
+# --- Neo4j Driver Management ---
+driver = None
 
 def get_driver():
-    url = os.getenv("NEO4J_URL", "bolt://localhost:7687")
-    user = os.getenv("NEO4J_USER", "neo4j")
-    password = os.getenv("NEO4J_PASSWORD", "test")
-    return GraphDatabase.driver(url, auth=basic_auth(user, password))
+    global driver
+    if driver is None:
+        log.info(f"Initializing Neo4j driver for {NEO4J_URL}")
+        try:
+            driver = AsyncGraphDatabase.driver(NEO4J_URL, auth=(NEO4J_USER, NEO4J_PASSWORD))
+            log.info("Neo4j driver initialized successfully.")
+        except exceptions.AuthError as e:
+            log.critical(f"Neo4j authentication failed: {e}")
+            raise RuntimeError("Neo4j authentication failed.")
+        except Exception as e:
+            log.critical(f"Failed to initialize Neo4j driver: {e}", exc_info=True)
+            raise RuntimeError(f"Neo4j driver initialization failed: {e}")
+    return driver
 
+async def close_driver():
+    global driver
+    if driver:
+        log.info("Closing Neo4j driver.")
+        await driver.close()
+        driver = None
 
-driver = get_driver()
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    get_driver()
+    yield
+    await close_driver()
 
-app = FastAPI(title="Knowledge Graph Service", version="1.0.0")
+# --- Models ---
+class CypherQuery(BaseModel):
+    query: str
+    parameters: dict = {}
 
-# --- Simple API Key middleware (applies to all routes except health/docs) ---
-API_KEY = os.getenv("API_KEY", "")
-from starlette.responses import JSONResponse
+# --- Service Initialization ---
+app = FastAPI(
+    title="Knowledge Graph Service",
+    description="Provides an interface for querying a Neo4j graph database.",
+    version="1.0.0",
+    lifespan=lifespan
+)
 
-@app.middleware("http")
-async def _require_api_key(request, call_next):
-    # allow unauthenticated access to health and docs
-    if request.url.path in {"/health", "/docs", "/openapi.json"} or request.url.path.startswith("/docs"):
-        return await call_next(request)
-    key = request.headers.get("X-API-Key")
-    if not API_KEY or key != API_KEY:
-        return JSONResponse(status_code=403, content={"detail": "Forbidden"})
-    return await call_next(request)
-
-
-
-
-class Node(BaseModel):
-    label: str = Field(..., description="The label of the node (e.g., Sensor)")
-    properties: Dict[str, Any] = Field(
-        default_factory=dict, description="Key/value properties to attach to the node"
-    )
-
-
-class Relationship(BaseModel):
-    start_id: int = Field(..., description="Internal ID of the start node")
-    end_id: int = Field(..., description="Internal ID of the end node")
-    rel_type: str = Field(..., description="Type of the relationship (e.g., INSTALLED_IN)")
-    properties: Optional[Dict[str, Any]] = Field(
-        default_factory=dict, description="Optional properties on the relationship"
-    )
-
-
-class QueryRequest(BaseModel):
-    cypher: str = Field(..., description="Cypher query to run")
-    params: Optional[Dict[str, Any]] = Field(
-        default_factory=dict, description="Optional parameters for the query"
-    )
-
-
-@app.post("/nodes", summary="Create a node")
-def create_node(node: Node):
-    """Create a single node in the graph and return its internal ID."""
-    label = node.label.strip()
-    if not label.isidentifier():
-        raise HTTPException(status_code=400, detail="Label must be a valid identifier")
-    props = node.properties
-    # Use a dynamic Cypher query to inject the label. Parameterised queries
-    # cannot substitute labels, but we still parameterise the properties.
-    query = f"CREATE (n:{label} $props) RETURN id(n) AS id"
-    try:
-        with driver.session() as session:
-            result = session.run(query, props=props)
-            record = result.single()
-            return {"id": record["id"]}
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc))
-
-
-@app.post("/relationships", summary="Create a relationship")
-def create_relationship(rel: Relationship):
-    """Create a relationship between two nodes by internal IDs."""
-    rel_type = rel.rel_type.strip().upper()
-    if not rel_type.isidentifier():
-        raise HTTPException(status_code=400, detail="Relationship type must be a valid identifier")
-    props = rel.properties or {}
-    query = (
-        f"MATCH (a), (b) WHERE id(a) = $start AND id(b) = $end "
-        f"CREATE (a)-[r:{rel_type} $props]->(b) RETURN id(r) AS id"
-    )
-    try:
-        with driver.session() as session:
-            result = session.run(query, start=rel.start_id, end=rel.end_id, props=props)
-            record = result.single()
-            return {"id": record["id"]}
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc))
-
-
-@app.post("/query", summary="Run an arbitrary Cypher query")
-def run_query(req: QueryRequest):
-    """Execute a Cypher query and return the raw result list.
-
-    For safety, only queries starting with MATCH/RETURN are allowed. This
-    restriction prevents accidental writes or destructive operations via
-    the API. More sophisticated access control could be added here.
+# --- API Endpoints ---
+@app.post("/query", summary="Execute a Cypher query")
+async def execute_query(request: CypherQuery):
     """
-    cypher = req.cypher.strip()
-    if not cypher.lower().startswith("match"):
-        raise HTTPException(status_code=400, detail="Only read queries beginning with MATCH are allowed")
-    params = req.params or {}
+    Executes a Cypher query against the Neo4j database.
+    """
+    driver = get_driver()
     try:
-        with driver.session() as session:
-            result = session.run(cypher, **params)
-            records = [record.data() for record in result]
-            return {"results": records}
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc))
+        async with driver.session() as session:
+            result = await session.run(request.query, request.parameters)
+            records = [record.data() async for record in result]
+            log.info(f"Query executed successfully, returned {len(records)} records.")
+            return {"result": records}
+    except exceptions.CypherSyntaxError as e:
+        log.error(f"Cypher syntax error in query '{request.query}': {e}")
+        raise HTTPException(status_code=400, detail=f"Cypher Syntax Error: {e.message}")
+    except Exception as e:
+        log.error(f"Error executing Cypher query: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
 
-
-@app.get("/health", summary="Health check")
-def health():
-    return {"status": "ok"}
+@app.get("/health", summary="Health check endpoint")
+async def health_check():
+    """Provides a basic health check of the service."""
+    driver = get_driver()
+    try:
+        await driver.verify_connectivity()
+        return {"status": "ok", "neo4j_connection": "ok"}
+    except Exception as e:
+        log.error(f"Health check failed: {e}")
+        raise HTTPException(status_code=503, detail=f"Service Unavailable: Cannot connect to Neo4j. {e}")
