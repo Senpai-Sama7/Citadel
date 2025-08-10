@@ -1,0 +1,237 @@
+version: "3.9"
+
+services:
+  # ---------- Infrastructure ----------
+  redis:
+    image: redis:7-alpine
+    container_name: full_ai_platform-redis
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis-data:/data
+    ports:
+      - "6380:6379"        # host remap to avoid conflicts on 6379
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+    networks:
+      - full_ai_network
+
+  timescaledb:
+    image: timescale/timescaledb:latest-pg14
+    container_name: full_ai_platform-timescaledb
+    environment:
+      POSTGRES_USER: tsdbadmin
+      POSTGRES_PASSWORD: s8zk2pxjcwanixr4
+      POSTGRES_DB: tsdb
+    volumes:
+      - timescale-data:/var/lib/postgresql/data
+    ports:
+      - "5433:5432"        # host remap to avoid conflicts on 5432
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U tsdbadmin -d tsdb -h localhost -p 5432"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+    networks:
+      - full_ai_network
+
+  neo4j:
+    image: neo4j:5
+    container_name: full_ai_platform-neo4j
+    environment:
+      NEO4J_AUTH: "neo4j/_xMQKdXlKApi3Dv4UntEN1QzbYZHFD76WxHCvOIhn3Y"
+      # Optional tuning:
+      # NEO4J_server_memory_heap_initial__size: 512m
+      # NEO4J_server_memory_heap_max__size: 1g
+    volumes:
+      - neo4j-data:/data
+    ports:
+      - "7474:7474"        # HTTP
+      - "7687:7687"        # Bolt
+    restart: unless-stopped
+    networks:
+      - full_ai_network
+
+  # ---------- AI Services ----------
+  vector_search:
+    build: ./services/vector_search
+    container_name: full_ai_platform-vector_search
+    volumes:
+      - vector-search-data:/data/vector_index
+    environment:
+      REDIS_URL: redis://redis:6379
+    ports:
+      - "8001:8000"
+    depends_on:
+      - redis
+    restart: unless-stopped
+    networks:
+      - full_ai_network
+
+  knowledge_graph:
+    build: ./services/knowledge_graph
+    container_name: full_ai_platform-knowledge_graph
+    environment:
+      NEO4J_URL: bolt://neo4j:7687
+      NEO4J_AUTH: "neo4j/_xMQKdXlKApi3Dv4UntEN1QzbYZHFD76WxHCvOIhn3Y"
+    ports:
+      - "8002:8000"
+    depends_on:
+      - neo4j
+    restart: unless-stopped
+    networks:
+      - full_ai_network
+
+  causal_inference:
+    build: ./services/causal_inference
+    container_name: full_ai_platform-causal_inference
+    ports:
+      - "8003:8000"
+    restart: unless-stopped
+    networks:
+      - full_ai_network
+
+  time_series:
+    build: ./services/time_series
+    container_name: full_ai_platform-time_series
+    ports:
+      - "8004:8000"
+    restart: unless-stopped
+    networks:
+      - full_ai_network
+
+  multi_modal:
+    build: ./services/multi_modal
+    container_name: full_ai_platform-multi_modal
+    ports:
+      - "8005:8000"
+    restart: unless-stopped
+    networks:
+      - full_ai_network
+
+  hierarchical_classification:
+    build: ./services/hierarchical_classification
+    container_name: full_ai_platform-hierarchical_classification
+    ports:
+      - "8006:8000"
+    volumes:
+      - ./services/hierarchical_classification/data:/data   # model persistence for save/load
+    restart: unless-stopped
+    networks:
+      - full_ai_network
+
+  rule_engine:
+    build: ./services/rule_engine
+    container_name: full_ai_platform-rule_engine
+    environment:
+      REDIS_URL: redis://redis:6379
+    ports:
+      - "8007:8000"
+    depends_on:
+      - redis
+    restart: unless-stopped
+    networks:
+      - full_ai_network
+
+  shell_command:
+    build: ./services/shell_command
+    container_name: full_ai_platform-shell_command
+    ports:
+      - "8011:8000"
+    restart: unless-stopped
+    networks:
+      - full_ai_network
+
+  # ---------- Orchestrator & Gateway ----------
+  orchestrator:
+    build: ./services/orchestrator
+    container_name: full_ai_platform-orchestrator
+    environment:
+      REDIS_URL: redis://redis:6379
+      NEO4J_URL: bolt://neo4j:7687
+      NEO4J_AUTH: "neo4j/_xMQKdXlKApi3Dv4UntEN1QzbYZHFD76WxHCvOIhn3Y"
+      TIMESCALEDB_URL: postgresql://tsdbadmin:s8zk2pxjcwanixr4@timescaledb:5432/tsdb
+    ports:
+      - "8008:8000"
+    depends_on:
+      - redis
+      - neo4j
+      - timescaledb
+    restart: unless-stopped
+    networks:
+      - full_ai_network
+
+  api_gateway:
+    build: ./notebooks/gateway
+    container_name: full_ai_platform-api_gateway
+    environment:
+      VECTOR_SEARCH_URL: http://vector_search:8000
+      KNOWLEDGE_GRAPH_URL: http://knowledge_graph:8000
+      CAUSAL_INFERENCE_URL: http://causal_inference:8000
+      TIME_SERIES_URL: http://time_series:8000
+      MULTI_MODAL_URL: http://multi_modal:8000
+      HIER_URL: http://hierarchical_classification:8000
+      HC_URL:   http://hierarchical_classification:8000
+      RULE_ENGINE_URL: http://rule_engine:8000
+      ORCHESTRATOR_URL: http://orchestrator:8000
+      WEB_SERVICE_URL: http://web_service:8000
+      SHELL_COMMAND_URL: http://shell_command:8000
+    ports:
+      - "8010:8000"        # changed from 8000:8000 to avoid host port collision
+    depends_on:
+      - vector_search
+      - knowledge_graph
+      - causal_inference
+      - time_series
+      - multi_modal
+      - hierarchical_classification
+      - rule_engine
+      - orchestrator
+      - web_service
+      - shell_command
+    restart: unless-stopped
+    networks:
+      - full_ai_network
+
+  web_service:
+    build: ./services/web_service
+    container_name: full_ai_platform-web_service
+    ports:
+      - "8009:8000"
+    restart: unless-stopped
+    networks:
+      - full_ai_network
+
+  nl_agent:
+    build: ./services/nl_agent
+    container_name: full_ai_platform-nl_agent
+    volumes:
+      - ./models:/models
+    environment:
+      GATEWAY_URL: http://api_gateway:8000/v1
+      MODEL_PATH: /models/Llama-3-8B-Instruct-Q4_K_M.gguf
+      SHELL_CONFIRMATION_REQUIRED: "true"
+    ports:
+      - "8012:8080"    # OpenAI-compatible /v1/chat/completions on 8012
+    depends_on:
+      - api_gateway
+    restart: unless-stopped
+    networks:
+      - full_ai_network
+
+# ---------- Networking ----------
+networks:
+  full_ai_network:
+    driver: bridge
+
+# ---------- Persistent Volumes ----------
+volumes:
+  redis-data:
+  timescale-data:
+  neo4j-data:
+  vector-search-data:
+
