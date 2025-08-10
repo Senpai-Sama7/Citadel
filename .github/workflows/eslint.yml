@@ -18,10 +18,18 @@ on:
   schedule:
     - cron: '31 2 * * 4'
 
+permissions:
+  contents: read
+
+concurrency:
+  group: eslint-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   eslint:
     name: Run eslint scanning
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     permissions:
       contents: read
       security-events: write
@@ -30,10 +38,15 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
       - name: Install ESLint
         run: |
-          npm install eslint@8.10.0
-          npm install @microsoft/eslint-formatter-sarif@3.1.0
+          npm install eslint@8.10.0 @microsoft/eslint-formatter-sarif@3.1.0
 
       - name: Run ESLint
         env:

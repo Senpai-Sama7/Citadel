@@ -26,10 +26,18 @@ on:
     - cron: '27 1 * * 3'
   workflow_dispatch:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: fortify-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   Fortify-AST-Scan:
     # Use the appropriate runner for building your source code. Ensure dev tools required to build your code are present and configured appropriately (MSBuild, Python, etc).
     runs-on: ubuntu-latest
+    timeout-minutes: 360
     permissions:
       actions: read
       contents: read
