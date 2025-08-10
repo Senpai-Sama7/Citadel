@@ -15,18 +15,32 @@ import subprocess
 import httpx
 import sqlite3
 import re
-import psutil
-from typing import List, Dict, Any, Optional, AsyncGenerator, Callable
+from typing import List, Dict, Any, Optional, Callable
 
 from llama_cpp import Llama
 from git import Repo, InvalidGitRepositoryError
 
 # --- Configuration ---
-CONFIG_PATH = "local_agent/config.json"
+CONFIG_PATH = os.getenv("CITADEL_CONFIG_PATH", "local_agent/config.json")
 
 def load_config():
-    with open(CONFIG_PATH, "r") as f:
-        return json.load(f)
+    """Loads the configuration from the specified path."""
+    try:
+        with open(CONFIG_PATH, "r") as f:
+            return json.load(f)
+    except FileNotFoundError:
+        logging.error(f"Configuration file not found at {CONFIG_PATH}")
+        # Provide a default configuration
+        return {
+            "model_path": "models/Llama-3-8B-Instruct-Q4_K_M.gguf",
+            "n_gpu_layers": -1,
+            "n_ctx": 4096,
+            "max_tokens": 1024,
+            "temperature": 0.3,
+            "log_level": "INFO",
+            "autonomous_mode": False,
+            "gateway_url": "http://localhost:8010"
+        }
 
 config = load_config()
 
@@ -37,6 +51,7 @@ N_CTX = config.get("n_ctx", 4096)
 MAX_TOKENS = config.get("max_tokens", 1024)
 TEMPERATURE = config.get("temperature", 0.3)
 AUTONOMOUS_MODE = config.get("autonomous_mode", False)
+GATEWAY_URL = config.get("gateway_url", "http://localhost:8010")
 
 logging.basicConfig(
     level=LOG_LEVEL,
@@ -48,22 +63,27 @@ log = logging.getLogger("local_super_agent_core")
 DB_PATH = "local_agent/memory.db"
 
 def init_db():
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS memory (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-            fact TEXT
-        )
-    ''')
-    conn.commit()
-    conn.close()
+    """Initializes the SQLite database for persistent memory."""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS memory (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+                fact TEXT
+            )
+        ''')
+        conn.commit()
+        conn.close()
+    except sqlite3.Error as e:
+        log.error(f"Database error: {e}")
 
 init_db()
 
 # --- Tool Definitions ---
 class Tool:
+    """A class to represent a tool that the agent can use."""
     def __init__(self, name: str, description: str, func: Callable, requires_confirmation: bool = False):
         self.name = name
         self.description = description
@@ -72,32 +92,29 @@ class Tool:
         self.parameters = {k: "<...>" for k in func.__code__.co_varnames}
 
     def to_dict(self):
+        """Returns a dictionary representation of the tool."""
         return {
             "name": self.name,
             "description": self.description,
             "parameters": self.parameters
         }
 
-# Helper for shell commands
 def _run_shell_command(command: str) -> str:
+    """
+    Executes a shell command and returns the output.
+    Note: This function uses shell=True, which can be a security risk.
+    Ensure that the command is sanitized before execution.
+    """
     try:
         result = subprocess.run(command, shell=True, capture_output=True, text=True, check=True)
-        return f"STDOUT:
-{result.stdout}
-STDERR:
-{result.stderr}"
+        return f"STDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}"
     except subprocess.CalledProcessError as e:
-        return f"ERROR:
-STDOUT:
-{e.stdout}
-STDERR:
-{e.stderr}
-Exit Code: {e.returncode}"
+        return f"ERROR:\nSTDOUT:\n{e.stdout}\nSTDERR:\n{e.stderr}\nExit Code: {e.returncode}"
     except Exception as e:
         return f"ERROR: {str(e)}"
 
-# Helper for file operations
 def _read_file(path: str) -> str:
+    """Reads the content of a file."""
     try:
         with open(path, "r") as f:
             return f.read()
@@ -107,6 +124,7 @@ def _read_file(path: str) -> str:
         return f"ERROR: Could not read file: {str(e)}"
 
 def _write_file(path: str, content: str) -> str:
+    """Writes content to a file."""
     try:
         with open(path, "w") as f:
             f.write(content)
@@ -115,6 +133,7 @@ def _write_file(path: str, content: str) -> str:
         return f"ERROR: Could not write to file: {str(e)}"
 
 def _list_directory(path: str) -> str:
+    """Lists the contents of a directory."""
     try:
         return "\n".join(os.listdir(path))
     except FileNotFoundError:
@@ -123,6 +142,7 @@ def _list_directory(path: str) -> str:
         return f"ERROR: Could not list directory: {str(e)}"
 
 def _search_file_content(pattern: str, path: str = ".") -> str:
+    """Searches for a regular expression pattern within files."""
     matches = []
     for root, _, files in os.walk(path):
         for file in files:
@@ -137,6 +157,7 @@ def _search_file_content(pattern: str, path: str = ".") -> str:
     return "\n".join(matches) if matches else "No matches found."
 
 def _glob_files(pattern: str, path: str = ".") -> str:
+    """Finds files matching a glob pattern."""
     import glob
     try:
         return "\n".join(glob.glob(os.path.join(path, pattern), recursive=True))
@@ -144,19 +165,21 @@ def _glob_files(pattern: str, path: str = ".") -> str:
         return f"ERROR: Could not glob files: {str(e)}"
 
 def _install_package(package_name: str) -> str:
+    """Installs a Python package using pip."""
     return _run_shell_command(f"pip install {package_name}")
 
 def _run_tests(test_path: str = ".") -> str:
+    """Runs pytest tests."""
     return _run_shell_command(f"pytest {test_path}")
 
 def _git_command(command: str) -> str:
+    """Executes a Git command."""
     try:
-        repo = Repo(os.getcwd()) # Assume current working directory is repo root
+        repo = Repo(os.getcwd())
         if command.startswith("commit"):
-            # Special handling for commit to ensure message is quoted
             parts = command.split(" ", 1)
             if len(parts) > 1:
-                return _run_shell_command(f"git commit -m \"{parts[1].replace('"', '\"')}\"")
+                return _run_shell_command(f'git commit -m "{parts[1].replace("`", "")}"')
             else:
                 return "ERROR: Git commit command requires a message."
         return _run_shell_command(f"git {command}")
@@ -165,9 +188,8 @@ def _git_command(command: str) -> str:
     except Exception as e:
         return f"ERROR: Git command failed: {str(e)}"
 
-GATEWAY_URL = config.get("gateway_url", "http://localhost:8010")
-
 async def _call_remote_service(service_prefix: str, endpoint: str, payload: Dict[str, Any]) -> str:
+    """A helper function to call a remote service."""
     try:
         async with httpx.AsyncClient() as client:
             response = await client.post(f"{GATEWAY_URL}/{service_prefix}/{endpoint}", json=payload, timeout=60.0)
@@ -181,12 +203,15 @@ async def _call_remote_service(service_prefix: str, endpoint: str, payload: Dict
         return f"ERROR: Unexpected error calling {service_prefix}/{endpoint}: {e}"
 
 async def _web_search(query: str, max_results: int = 5) -> str:
+    """Performs a web search."""
     return await _call_remote_service("web", "search", {"query": query, "max_results": max_results})
 
 async def _web_fetch(url: str) -> str:
+    """Fetches the content of a URL."""
     return await _call_remote_service("web", "fetch", {"url": url})
 
 def _save_memory(fact: str) -> str:
+    """Saves a fact to the agent's persistent memory."""
     try:
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
@@ -194,52 +219,56 @@ def _save_memory(fact: str) -> str:
         conn.commit()
         conn.close()
         return "Fact saved to memory."
-    except Exception as e:
-        return f"ERROR: Could not save fact to memory: {str(e)}"
+    except sqlite3.Error as e:
+        return f"ERROR: Could not save fact to memory: {e}"
 
 def _retrieve_memory(query: str) -> str:
+    """Retrieves facts from the agent's persistent memory."""
     try:
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
-        # Simple keyword search for demonstration
         cursor.execute("SELECT fact FROM memory WHERE fact LIKE ?", (f"%{query}%",))
         results = cursor.fetchall()
         conn.close()
         return "\n".join([row[0] for row in results]) if results else "No relevant facts found in memory."
-    except Exception as e:
-        return f"ERROR: Could not retrieve facts from memory: {str(e)}"
+    except sqlite3.Error as e:
+        return f"ERROR: Could not retrieve facts from memory: {e}"
 
 def _restart_agent() -> str:
-    # This function cannot directly restart the Python process that is running it.
-    # It will signal to the GUI that a restart is needed.
-    # The GUI (or an external process manager) would then handle the actual restart.
+    """Signals that the agent needs to be restarted."""
     return "RESTART_SIGNAL: Agent needs to be restarted to apply changes. Please restart the application."
 
-
 async def _vector_search(query: str, top_k: int = 3) -> str:
+    """Performs a vector search."""
     return await _call_remote_service("vector", "search", {"query": query, "top_k": top_k})
 
 async def _knowledge_graph_query(query: str) -> str:
+    """Queries the knowledge graph."""
     return await _call_remote_service("knowledge", "query", {"query": query})
 
 async def _time_series_forecast(series: List[float], steps: int = 10) -> str:
+    """Forecasts a time series."""
     return await _call_remote_service("time", "forecast", {"series": series, "steps": steps})
 
 async def _causal_inference(data: Dict[str, Any]) -> str:
+    """Performs causal inference."""
     return await _call_remote_service("causal", "infer", {"data": data})
 
 async def _multi_modal_process(image_url: str, text: str) -> str:
+    """Processes multi-modal data."""
     return await _call_remote_service("multi", "process", {"image_url": image_url, "text": text})
 
 async def _hierarchical_classification(text: str) -> str:
+    """Performs hierarchical classification."""
     return await _call_remote_service("hier", "classify", {"text": text})
 
 async def _rule_engine_evaluate(data: Dict[str, Any]) -> str:
+    """Evaluates data against rules."""
     return await _call_remote_service("rule", "evaluate", {"data": data})
 
 async def _orchestrator_publish(event_type: str, data: Dict[str, Any]) -> str:
+    """Publishes an event to the orchestrator."""
     return await _call_remote_service("orch", "publish", {"type": event_type, "data": data})
-
 
 AVAILABLE_TOOLS = [
     Tool("execute_shell", "Executes a shell command on the local machine. Use this for any command-line operations.", _run_shell_command, requires_confirmation=True),
@@ -266,13 +295,14 @@ AVAILABLE_TOOLS = [
     Tool("restart_agent", "Signals that the agent needs to be restarted to apply changes (e.g., after code modifications).", _restart_agent, requires_confirmation=True),
 ]
 
-# --- LLM & Agent Core ---
 class Agent:
+    """The core of the Local Super Agent."""
     def __init__(self):
         self.llm: Optional[Llama] = None
         self._load_model()
 
     def _load_model(self):
+        """Loads the Llama model."""
         if not os.path.exists(MODEL_PATH):
             log.error(f"Fatal: Model file not found at {MODEL_PATH}")
             raise FileNotFoundError(f"Model file not found at {MODEL_PATH}")
@@ -285,6 +315,7 @@ class Agent:
             raise RuntimeError(f"LLM failed to load: {e}")
 
     def get_system_prompt(self) -> str:
+        """Generates the system prompt for the agent."""
         tool_list_str = json.dumps([tool.to_dict() for tool in AVAILABLE_TOOLS], indent=2)
 
         return f"""You are a super-intelligent, autonomous AI agent with full access to this computer and a suite of specialized microservices. Your goal is to solve the user's request by creating a plan and then executing it. You can also modify your own source code and architecture.
@@ -326,6 +357,7 @@ After each tool call, you will get the result. Use this result to inform your ne
 """
 
     async def process_chat(self, messages: List[Dict[str, Any]], send_response: Callable[[str], None], send_confirmation_request: Callable[[str, Dict[str, Any]], bool]) -> None:
+        """Processes a chat message from the user."""
         full_messages = [{"role": "system", "content": self.get_system_prompt()}] + messages
 
         for i in range(10): # Limit iterations to prevent infinite loops
@@ -344,8 +376,6 @@ After each tool call, you will get the result. Use this result to inform your ne
                 for chunk in stream:
                     delta = chunk["choices"][0]["delta"].get("content", "")
                     full_response_content += delta
-                    # For streaming LLM output to the user
-                    # send_response(delta) # This would stream the LLM's thought process
 
                 log.debug(f"LLM Full Response: {full_response_content}")
 
@@ -371,14 +401,13 @@ After each tool call, you will get the result. Use this result to inform your ne
                             else:
                                 tool_result = tool_obj.func(**parameters)
 
-                        full_messages.append({"role": "assistant", "content": full_response_content}) # The tool request
-                        full_messages.append({"role": "tool", "content": str(tool_result)}) # The tool's output
-                        continue # Go back to the LLM with the new info
+                        full_messages.append({"role": "assistant", "content": full_response_content})
+                        full_messages.append({"role": "tool", "content": str(tool_result)})
+                        continue
 
                 except (json.JSONDecodeError, TypeError):
-                    # Not a tool call, so it's a final answer or an intermediate thought
                     send_response(full_response_content)
-                    return # End the loop if it's a final answer
+                    return
 
             except Exception as e:
                 log.error(f"Error during LLM interaction or tool loop: {e}", exc_info=True)
@@ -386,29 +415,3 @@ After each tool call, you will get the result. Use this result to inform your ne
                 return
 
         send_response("Max iterations reached without a final answer. Please try again with a more specific query.")
-
-# --- Main execution for testing (if run directly) ---
-if __name__ == "__main__":
-    # This block is for direct testing of the agent logic without the GUI
-    # In a real scenario, the GUI would instantiate and use the Agent class.
-    print("Running Agent in CLI mode for testing...")
-    agent = Agent()
-
-    async def cli_send_response(text: str):
-        print(f"Agent: {text}")
-
-    async def cli_send_confirmation_request(tool_name: str, parameters: Dict[str, Any]) -> bool:
-        print(f"Agent wants to run {tool_name} with parameters: {parameters}")
-        response = input("Allow? (yes/no): ").lower()
-        return response == "yes"
-
-    async def main_cli_loop():
-        while True:
-            user_input = input("You: ")
-            if user_input.lower() == "exit":
-                break
-            messages = [{"role": "user", "content": user_input}]
-            await agent.process_chat(messages, cli_send_response, cli_send_confirmation_request)
-
-    import asyncio
-    asyncio.run(main_cli_loop())
