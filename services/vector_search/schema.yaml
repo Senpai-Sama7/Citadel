@@ -1,0 +1,15 @@
+index:
+  name: vector-index
+  prefix: doc
+  storage_type: hash
+
+fields:
+  - name: text
+    type: text
+  - name: vector
+    type: vector
+    attrs:
+      algorithm: flat
+      dims: 384
+      distance_metric: cosine
+      datatype: float32
