@@ -13,7 +13,7 @@ Before you can chat with your agent, you need to set it up. Don't worry, it's si
 ### What You Need:
 
 *   **Python:** Think of Python as the language your computer needs to understand the agent. If you don't have it, you can download it from [python.org](https://www.python.org/downloads/).
-*   **A Folder:** Your agent lives in a special folder on your computer. This is the `full_ai_platform` folder you've been working with.
+*   **A Folder:** Your agent lives in a special folder on your computer. This is the `Citadel` folder you've been working with.
 
 ### Step-by-Step Setup:
 
@@ -24,9 +24,9 @@ Before you can chat with your agent, you need to set it up. Don't worry, it's si
 2.  **Go to Your Agent's Folder:**
     In the Terminal/Command Prompt, type this command and press Enter:
     ```bash
-    cd /home/donovan/Downloads/full_ai_platform
+cd /path/to/your/Citadel
     ```
-    (This command tells your computer to go into the `full_ai_platform` folder.)
+    (This command tells your computer to go into the `Citadel` folder.)
 
 3.  **Install Agent's Tools:**
     Now, type this command and press Enter:
@@ -49,7 +49,7 @@ Before you can chat with your agent, you need to set it up. Don't worry, it's si
 If you want to make your agent a single-click application (like other programs on your computer), you can use a tool called `PyInstaller`.
 
 1.  **Install PyInstaller:**
-    In your Terminal/Command Prompt (in the `full_ai_platform` folder), type:
+    In your Terminal/Command Prompt (in the `Citadel` folder), type:
     ```bash
     pip install pyinstaller
     ```
@@ -59,7 +59,7 @@ If you want to make your agent a single-click application (like other programs o
     ```bash
     pyinstaller --onefile --windowed --name LocalSuperAgent local_agent/gui.py
     ```
-    This will create a new folder called `dist` inside your `full_ai_platform` folder. Inside `dist`, you'll find an executable file named `LocalSuperAgent` (or `LocalSuperAgent.exe` on Windows). You can double-click this file to start your agent without using the Terminal/Command Prompt.
+    This will create a new folder called `dist` inside your `Citadel` folder. Inside `dist`, you'll find an executable file named `LocalSuperAgent` (or `LocalSuperAgent.exe` on Windows). You can double-click this file to start your agent without using the Terminal/Command Prompt.
 
 ---
 
@@ -215,7 +215,7 @@ If you absolutely understand the risks and wish to change this setting:
 
 1.  **Close Your Agent:** Close the agent's desktop window and the Terminal/Command Prompt window where it was running.
 2.  **Open `config.json`:**
-    *   Go to your `full_ai_platform` folder.
+    *   Go to your `Citadel` folder.
     *   Then go into the `local_agent` folder.
     *   Find the file named `config.json` and open it with a simple text editor (like Notepad on Windows, TextEdit on macOS, or any code editor).
 3.  **Change the Setting:**
