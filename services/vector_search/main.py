@@ -140,10 +140,7 @@ async def index_documents(documents: List[Document], api_key: str = Security(get
         if data_to_load:
             index.load(data_to_load, id_field="id")
             logger.info(f"Successfully indexed {len(data_to_load)} documents.")
-        return {
-            "indexed": len(data_to_load),
-            "message": f"Successfully indexed {len(data_to_load)} documents."
-        }
+        return {"message": f"Successfully indexed {len(data_to_load)} documents."}
     except Exception as e:
         logger.error(f"Error indexing documents: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
