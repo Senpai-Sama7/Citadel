@@ -1,10 +1,10 @@
 version: "3.9"
 
 services:
-  # ---------- Infrastructure ----------
+  # -------------------- Infrastructure --------------------
   redis:
     image: redis:7-alpine
-    container_name: full_ai_platform-redis
+    container_name: citadel-redis
     command: ["redis-server", "--appendonly", "yes"]
     volumes:
       - redis-data:/data
@@ -13,19 +13,19 @@ services:
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
-      timeout: 3s
+      timeout: 5s
       retries: 10
     restart: unless-stopped
     networks:
-      - full_ai_network
+      - citadel-net
 
   timescaledb:
     image: timescale/timescaledb:latest-pg14
-    container_name: full_ai_platform-timescaledb
+    container_name: citadel-timescaledb
     environment:
-      POSTGRES_USER: ${TS_USER:-tsdbadmin}
-      POSTGRES_PASSWORD: ${TS_PASSWORD:-s8zk2pxjcwanixr4}
-      POSTGRES_DB: ${TS_DB:-tsdb}
+      POSTGRES_USER: ${TS_USER}
+      POSTGRES_PASSWORD: ${TS_PASSWORD}
+      POSTGRES_DB: ${TS_DB}
     volumes:
       - timescale-data:/var/lib/postgresql/data
     ports:
@@ -37,13 +37,13 @@ services:
       retries: 20
     restart: unless-stopped
     networks:
-      - full_ai_network
+      - citadel-net
 
   neo4j:
     image: neo4j:5
-    container_name: full_ai_platform-neo4j
+    container_name: citadel-neo4j
     environment:
-      NEO4J_AUTH: "${NEO4J_USER:-neo4j}/${NEO4J_PASSWORD:-_xMQKdXlKApi3Dv4UntEN1QzbYZHFD76WxHCvOIhn3Y}"
+      NEO4J_AUTH: "${NEO4J_USER}/${NEO4J_PASSWORD}"
     volumes:
       - neo4j-data:/data
     ports:
@@ -51,109 +51,123 @@ services:
       - "7687:7687"
     restart: unless-stopped
     networks:
-      - full_ai_network
+      - citadel-net
 
-  # ---------- AI Services ----------
+  # -------------------- AI & Utility Services --------------------
   vector_search:
     build: ./services/vector_search
-    container_name: full_ai_platform-vector_search
-    volumes:
-      - vector-search-data:/data/vector_index
+    container_name: citadel-vector_search
     environment:
-      REDIS_URL: redis://redis:6379
+      REDIS_URL: ${REDIS_URL}
+      API_KEY: ${API_KEY}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL}
     ports:
       - "8001:8000"
     depends_on:
-      - redis
+      redis:
+        condition: service_healthy
     restart: unless-stopped
     networks:
-      - full_ai_network
+      - citadel-net
 
   knowledge_graph:
     build: ./services/knowledge_graph
-    container_name: full_ai_platform-knowledge_graph
+    container_name: citadel-knowledge_graph
     environment:
       NEO4J_URL: bolt://neo4j:7687
-      NEO4J_USER: ${NEO4J_USER:-neo4j}
-      NEO4J_PASSWORD: ${NEO4J_PASSWORD:-_xMQKdXlKApi3Dv4UntEN1QzbYZHFD76WxHCvOIhn3Y}
+      NEO4J_USER: ${NEO4J_USER}
+      NEO4J_PASSWORD: ${NEO4J_PASSWORD}
+      API_KEY: ${API_KEY}
     ports:
       - "8002:8000"
     depends_on:
       - neo4j
     restart: unless-stopped
     networks:
-      - full_ai_network
+      - citadel-net
 
   causal_inference:
     build: ./services/causal_inference
-    container_name: full_ai_platform-causal_inference
+    container_name: citadel-causal_inference
+    environment:
+      API_KEY: ${API_KEY}
     ports:
       - "8003:8000"
     restart: unless-stopped
     networks:
-      - full_ai_network
+      - citadel-net
 
   time_series:
     build: ./services/time_series
-    container_name: full_ai_platform-time_series
+    container_name: citadel-time_series
+    environment:
+      API_KEY: ${API_KEY}
     ports:
       - "8004:8000"
     restart: unless-stopped
     networks:
-      - full_ai_network
+      - citadel-net
 
   multi_modal:
     build: ./services/multi_modal
-    container_name: full_ai_platform-multi_modal
+    container_name: citadel-multi_modal
+    environment:
+      API_KEY: ${API_KEY}
     ports:
       - "8005:8000"
     restart: unless-stopped
     networks:
-      - full_ai_network
+      - citadel-net
 
   hierarchical_classification:
     build: ./services/hierarchical_classification
-    container_name: full_ai_platform-hierarchical_classification
+    container_name: citadel-hierarchical_classification
+    environment:
+      API_KEY: ${API_KEY}
     ports:
       - "8006:8000"
     volumes:
-      - ./services/hierarchical_classification/data:/data
+      - ./data/models:/data/models
     restart: unless-stopped
     networks:
-      - full_ai_network
+      - citadel-net
 
   rule_engine:
     build: ./services/rule_engine
-    container_name: full_ai_platform-rule_engine
+    container_name: citadel-rule_engine
     environment:
-      REDIS_URL: redis://redis:6379
+      API_KEY: ${API_KEY}
     ports:
       - "8007:8000"
-    depends_on:
-      - redis
     restart: unless-stopped
     networks:
-      - full_ai_network
+      - citadel-net
 
   shell_command:
     build: ./services/shell_command
-    container_name: full_ai_platform-shell_command
+    container_name: citadel-shell_command
+    environment:
+      API_KEY: ${API_KEY}
     ports:
       - "8011:8000"
     restart: unless-stopped
     networks:
-      - full_ai_network
+      - citadel-net
 
-  # ---------- Orchestrator & Gateway ----------
+  # -------------------- Core Services --------------------
   orchestrator:
     build: ./services/orchestrator
-    container_name: full_ai_platform-orchestrator
+    container_name: citadel-orchestrator
     environment:
-      REDIS_URL: redis://redis:6379
+      REDIS_URL: ${REDIS_URL}
       NEO4J_URL: bolt://neo4j:7687
-      NEO4J_USER: ${NEO4J_USER:-neo4j}
-      NEO4J_PASSWORD: ${NEO4J_PASSWORD:-_xMQKdXlKApi3Dv4UntEN1QzbYZHFD76WxHCvOIhn3Y}
-      TIMESCALEDB_URL: postgresql://${TS_USER:-tsdbadmin}:${TS_PASSWORD:-s8zk2pxjcwanixr4}@timescaledb:5432/${TS_DB:-tsdb}
+      NEO4J_USER: ${NEO4J_USER}
+      NEO4J_PASSWORD: ${NEO4J_PASSWORD}
+      TS_HOST: timescaledb
+      TS_USER: ${TS_USER}
+      TS_PASSWORD: ${TS_PASSWORD}
+      TS_DB: ${TS_DB}
+      API_KEY: ${API_KEY}
     ports:
       - "8008:8000"
     depends_on:
@@ -162,19 +176,30 @@ services:
       - timescaledb
     restart: unless-stopped
     networks:
-      - full_ai_network
+      - citadel-net
+
+  web_service:
+    build: ./services/web_service
+    container_name: citadel-web_service
+    environment:
+      API_KEY: ${API_KEY}
+    ports:
+      - "8009:8000"
+    restart: unless-stopped
+    networks:
+      - citadel-net
 
   api_gateway:
     build: ./notebooks/gateway
-    container_name: full_ai_platform-api_gateway
+    container_name: citadel-api_gateway
     environment:
+      API_KEY: ${API_KEY}
       VECTOR_SEARCH_URL: http://vector_search:8000
       KNOWLEDGE_GRAPH_URL: http://knowledge_graph:8000
       CAUSAL_INFERENCE_URL: http://causal_inference:8000
       TIME_SERIES_URL: http://time_series:8000
       MULTI_MODAL_URL: http://multi_modal:8000
-      HIER_URL: http://hierarchical_classification:8000
-      HC_URL: http://hierarchical_classification:8000
+      HIERARCHICAL_CLASSIFICATION_URL: http://hierarchical_classification:8000
       RULE_ENGINE_URL: http://rule_engine:8000
       ORCHESTRATOR_URL: http://orchestrator:8000
       WEB_SERVICE_URL: http://web_service:8000
@@ -194,40 +219,31 @@ services:
       - shell_command
     restart: unless-stopped
     networks:
-      - full_ai_network
-
-  web_service:
-    build: ./services/web_service
-    container_name: full_ai_platform-web_service
-    ports:
-      - "8009:8000"
-    restart: unless-stopped
-    networks:
-      - full_ai_network
+      - citadel-net
 
   nl_agent:
     build: ./services/nl_agent
-    container_name: full_ai_platform-nl_agent
+    container_name: citadel-nl_agent
     volumes:
       - ./models:/models
     environment:
-      GATEWAY_URL: http://api_gateway:8000/v1
-      MODEL_PATH: /models/Llama-3-8B-Instruct-Q4_K_M.gguf
-      SHELL_CONFIRMATION_REQUIRED: "true"
+      MODEL_PATH: ${MODEL_PATH}
+      GATEWAY_URL: http://api_gateway:8000
+      API_KEY: ${API_KEY}
     ports:
-      - "8012:8080"
+      - "8012:8000"
     depends_on:
       - api_gateway
     restart: unless-stopped
     networks:
-      - full_ai_network
+      - citadel-net
 
-# ---------- Networking ----------
+# -------------------- Networking --------------------
 networks:
-  full_ai_network:
+  citadel-net:
     driver: bridge
 
-# ---------- Persistent Volumes ----------
+# -------------------- Persistent Volumes --------------------
 volumes:
   redis-data:
   timescale-data:
