@@ -1,3 +1,6 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+
 """
 Orchestrator Micro-service
 -------------------------
@@ -5,101 +8,82 @@ Orchestrator Micro-service
 Glues the AI platform together. Listens on a Redis stream for incoming events,
 dispatches to micro-services via HTTP, and persists to Neo4j and TimescaleDB.
 Exposes /publish to push events for testing.
-"""
 
-from __future__ import annotations
+Orchestrator Service (Refactored)
+---------------------------------
+
+This service listens for events on a Redis stream, dispatches them to other
+microservices, and persists data to Neo4j and TimescaleDB. It is now
+fully asynchronous and secured with API key authentication.
+"""
 
 import asyncio
 import json
 import os
-import time
 import logging
-from typing import Any, Dict, List, Tuple
-
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-logger = logging.getLogger(__name__)
+from contextlib import asynccontextmanager
+from typing import Any, Dict, List
 
 import httpx
 import psycopg2
-import redis.asyncio as redis  # <-- modern async Redis client
-from fastapi import FastAPI, BackgroundTasks, HTTPException
-from neo4j import GraphDatabase, basic_auth
+import redis.asyncio as redis
+from fastapi import FastAPI, HTTPException, Security
+from fastapi.security import APIKeyHeader
+from neo4j import AsyncGraphDatabase, basic_auth
 from pydantic import BaseModel
+from redis.exceptions import ResponseError
 
-# --- Environment (defaults set for docker-compose network) ---
-REDIS_HOST = os.getenv("REDIS_HOST", "redis")
-REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
-
-NEO4J_URL = os.getenv("NEO4J_URL", "bolt://neo4j:7687")
-NEO4J_USER = os.getenv("NEO4J_USER", "neo4j")
-NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD", "test")
-
-TS_HOST = os.getenv("TS_HOST", "timescaledb")
-TS_PORT = int(os.getenv("TS_PORT", "5432"))
-TS_USER = os.getenv("TS_USER", "tsuser")
-TS_PASSWORD = os.getenv("TS_PASSWORD", "tspassword")
-TS_DB = os.getenv("TS_DB", "tsdb")
-
+# --- Configuration ---
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+REDIS_URL = os.getenv("REDIS_URL")
+NEO4J_URL = os.getenv("NEO4J_URL")
+NEO4J_USER = os.getenv("NEO4J_USER")
+NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD")
+TS_HOST = os.getenv("TS_HOST")
+TS_USER = os.getenv("TS_USER")
+TS_PASSWORD = os.getenv("TS_PASSWORD")
+TS_DB = os.getenv("TS_DB")
 RULE_ENGINE_URL = os.getenv("RULE_ENGINE_URL", "http://rule_engine:8000")
-VECTOR_SEARCH_URL = os.getenv("VECTOR_SEARCH_URL", "http://vector_search:8000")
+API_KEY = os.getenv("API_KEY")
+REDIS_STREAM = "events"
+REDIS_GROUP = "orchestrator_group"
+CONSUMER_NAME = "orchestrator_consumer_1"
 
-app = FastAPI(title="Orchestrator Service", version="1.0.0")
+# --- Logging ---
+logging.basicConfig(level=LOG_LEVEL, format="%(asctime)s - %(levelname)s - %(message)s")
+logger = logging.getLogger(__name__)
 
-# --- Simple API Key middleware (applies to all routes except health/docs) ---
-API_KEY = os.getenv("API_KEY", "")
-from starlette.responses import JSONResponse
+# --- Pre-flight Checks ---
+if not all([REDIS_URL, NEO4J_URL, NEO4J_USER, NEO4J_PASSWORD, TS_HOST, TS_USER, TS_PASSWORD, TS_DB, API_KEY]):
+    raise ValueError("One or more required environment variables are not set.")
 
-@app.middleware("http")
-async def _require_api_key(request, call_next):
-    # allow unauthenticated access to health and docs
-    if request.url.path in {"/health", "/docs", "/openapi.json"} or request.url.path.startswith("/docs"):
-        return await call_next(request)
-    key = request.headers.get("X-API-Key")
-    if not API_KEY or key != API_KEY:
-        return JSONResponse(status_code=403, content={"detail": "Forbidden"})
-    return await call_next(request)
+# --- Globals ---
+redis_client: redis.Redis
+neo4j_driver: AsyncGraphDatabase
+listener_task: asyncio.Task
 
-
-
-
+# --- Models ---
 class Event(BaseModel):
-    """A generic event payload."""
     type: str
     data: Dict[str, Any]
 
-
-async def ensure_neo4j_driver():
-    return GraphDatabase.driver(NEO4J_URL, auth=basic_auth(NEO4J_USER, NEO4J_PASSWORD))
-
-
-def insert_timeseries(measurement: str, value: float, ts_seconds: float):
-    """Insert a value into TimescaleDB. Synchronous for simplicity."""
+# --- Database Connections ---
+def get_timescaledb_conn():
+    """Establishes a connection to TimescaleDB."""
     try:
-        conn = psycopg2.connect(
-            host=TS_HOST, port=TS_PORT, user=TS_USER, password=TS_PASSWORD, dbname=TS_DB
+        return psycopg2.connect(
+            host=TS_HOST, user=TS_USER, password=TS_PASSWORD, dbname=TS_DB
         )
-        cur = conn.cursor()
-        cur.execute(
-            "CREATE TABLE IF NOT EXISTS metrics (time TIMESTAMPTZ, measurement TEXT, value DOUBLE PRECISION);"
-        )
-        cur.execute(
-            "INSERT INTO metrics (time, measurement, value) VALUES (to_timestamp(%s), %s, %s);",
-            (ts_seconds, measurement, value),
-        )
-        conn.commit()
-        cur.close()
-        conn.close()
-    except Exception as e:
-        logger.error(f"Failed to insert timeseries data: {e}", exc_info=True)
-        # Fail silently in demo mode (but now with logging)
-        pass
+    except psycopg2.OperationalError as e:
+        logger.error(f"Failed to connect to TimescaleDB: {e}", exc_info=True)
+        return None
 
-
+# --- Event Processing ---
 async def process_event(event: Dict[bytes, bytes]):
-    """Process a single event from the Redis stream."""
+    """Processes a single event from the Redis stream."""
     try:
-        event_data = {k.decode(): json.loads(v.decode()) for k, v in event.items()}
-    except Exception as e:
+        event_data = {k.decode('utf-8'): json.loads(v.decode('utf-8')) for k, v in event.items()}
+    except (json.JSONDecodeError, UnicodeDecodeError) as e:
         logger.error(f"Failed to decode event data: {e}", exc_info=True)
         return
 
@@ -107,109 +91,115 @@ async def process_event(event: Dict[bytes, bytes]):
     payload = event_data.get("data", {})
 
     if event_type == "sensor":
-        # Example dispatch to rule engine
+        # Dispatch to rule engine
         actions = []
         try:
             async with httpx.AsyncClient() as client:
                 resp = await client.post(f"{RULE_ENGINE_URL}/evaluate", json=payload, timeout=20.0)
                 if resp.status_code == 200:
                     actions = resp.json().get("actions", [])
-        except Exception as e:
+        except httpx.RequestError as e:
             logger.error(f"Failed to call rule engine: {e}", exc_info=True)
-            actions = []
 
-        # Persist to Neo4j
-        try:
-            driver = await ensure_neo4j_driver()
-            with driver.session() as session:
-                for action in actions:
-                    session.run(
-                        "CREATE (e:Event {type: $type, action: $action})",
-                        type=event_type,
-                        action=action,
-                    )
-        except Exception as e:
-            logger.error(f"Failed to persist to Neo4j: {e}", exc_info=True)
-            pass
+        # Persist actions to Neo4j
+        if actions:
+            try:
+                async with neo4j_driver.session() as session:
+                    for action in actions:
+                        await session.run(
+                            "CREATE (e:Event {type: $type, action: $action, timestamp: datetime()})",
+                            type=event_type, action=action
+                        )
+            except Exception as e:
+                logger.error(f"Failed to persist to Neo4j: {e}", exc_info=True)
 
-        # Write numeric values to timeseries DB
-        for key, value in payload.items():
-            if isinstance(value, (int, float)):
-                insert_timeseries(key, float(value), time.time())
+        # Persist numeric values to TimescaleDB
+        conn = get_timescaledb_conn()
+        if conn:
+            try:
+                with conn.cursor() as cur:
+                    for key, value in payload.items():
+                        if isinstance(value, (int, float)):
+                            cur.execute(
+                                "INSERT INTO metrics (time, measurement, value) VALUES (NOW(), %s, %s);",
+                                (key, float(value))
+                            )
+                    conn.commit()
+            except Exception as e:
+                logger.error(f"Failed to insert into TimescaleDB: {e}", exc_info=True)
+            finally:
+                conn.close()
 
-
-async def ensure_consumer_group(r: redis.Redis, stream: str, group: str):
+# --- Redis Listener ---
+async def event_listener():
+    """Listens for events on the Redis stream and processes them."""
     try:
-        await r.xgroup_create(stream, group, id="$", mkstream=True)
+        await redis_client.xgroup_create(REDIS_STREAM, REDIS_GROUP, id="$", mkstream=True)
     except ResponseError as e:
-        if "BUSYGROUP" in str(e):
-            pass
-        else:
+        if "BUSYGROUP" not in str(e):
             raise
 
-async def event_listener(r: redis.Redis):
-    stream = REDIS_STREAM
-    group = REDIS_GROUP
-    consumer = CONSUMER_NAME
-    await ensure_consumer_group(r, stream, group)
     while True:
         try:
-            results = await r.xreadgroup(group, consumer, {stream: ">"}, count=50, block=5000)
-            if results:
-                for _stream, messages in results:
-                    for msg_id, fields in messages:
-                        try:
-                            await process_event(fields)
-                            await r.xack(stream, group, msg_id)
-                        except Exception as e:
-                            logger.error(f"Error processing event or acknowledging: {e}", exc_info=True)
-                            # leave in PEL for retry; optionally log
-                            pass
-            # light trim to keep stream bounded
-            try:
-                await r.xtrim(stream, maxlen=100000, approximate=True)
-            except Exception as e:
-                logger.warning(f"Error trimming Redis stream: {e}", exc_info=True)
-                pass
+            results = await redis_client.xreadgroup(
+                REDIS_GROUP, CONSUMER_NAME, {REDIS_STREAM: ">"}, count=10, block=5000
+            )
+            for _, messages in results:
+                for msg_id, fields in messages:
+                    await process_event(fields)
+                    await redis_client.xack(REDIS_STREAM, REDIS_GROUP, msg_id)
         except Exception as e:
-            logger.error(f"Unhandled exception in event listener loop: {e}", exc_info=True)
-            await asyncio.sleep(1)
+            logger.error(f"Error in event listener loop: {e}", exc_info=True)
+            await asyncio.sleep(5) # Backoff before retrying
 
+# --- FastAPI Lifecycle ---
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global redis_client, neo4j_driver, listener_task
+    redis_client = redis.from_url(REDIS_URL, decode_responses=False)
+    neo4j_driver = AsyncGraphDatabase.driver(NEO4J_URL, auth=basic_auth(NEO4J_USER, NEO4J_PASSWORD))
+    listener_task = asyncio.create_task(event_listener())
+    
+    conn = get_timescaledb_conn()
+    if conn:
+        with conn.cursor() as cur:
+            cur.execute("CREATE TABLE IF NOT EXISTS metrics (time TIMESTAMPTZ, measurement TEXT, value DOUBLE PRECISION);")
+        conn.commit()
+        conn.close()
 
-@app.on_event("startup")
-async def startup_event():
-    app.state.redis = redis.from_url(f"redis://{REDIS_HOST}:{REDIS_PORT}", decode_responses=False)
-    app.state.task = asyncio.create_task(event_listener(app.state.redis))
+    yield
+    
+    listener_task.cancel()
+    await redis_client.aclose()
+    await neo4j_driver.close()
 
+# --- Service Initialization ---
+app = FastAPI(
+    title="Orchestrator Service",
+    description="Listens for and processes events from a Redis stream.",
+    version="2.0.0",
+    lifespan=lifespan
+)
 
-@app.on_event("shutdown")
-async def shutdown_event():
-    task: asyncio.Task = app.state.task
-    task.cancel()
+# --- Security ---
+api_key_header = APIKeyHeader(name="X-API-KEY", auto_error=False)
+
+async def get_api_key(key: str = Security(api_key_header)):
+    if key == API_KEY:
+        return key
+    else:
+        raise HTTPException(status_code=403, detail="Invalid API Key")
+
+# --- API Endpoints ---
+@app.post("/publish", summary="Publish an event to the stream")
+async def publish_event(event: Event, api_key: str = Security(get_api_key)):
     try:
-        await task
-    except asyncio.CancelledError:
-        pass
-    try:
-        await app.state.redis.aclose()
-    except Exception:
-        pass
+        encoded_data = {k: json.dumps(v) for k, v in event.dict().items()}
+        msg_id = await redis_client.xadd(REDIS_STREAM, encoded_data)
+        return {"message_id": msg_id.decode('utf-8')}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
-
-@app.post("/publish", summary="Publish an event")
-async def publish_event(event: Event):
-    try:
-        data = {"type": event.type, "data": event.data}
-        encoded = {k: json.dumps(v) for k, v in data.items()}
-        msg_id = await app.state.redis.xadd("events", encoded)
-        if isinstance(msg_id, (bytes, bytearray)):
-            msg_id = msg_id.decode()
-        return {"message_id": msg_id}
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc))
-
-
-@app.get("/health", summary="Health check")
+@app.get("/health", summary="Health check endpoint")
 async def health():
     return {"status": "ok"}
-
