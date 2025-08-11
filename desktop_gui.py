@@ -41,20 +41,15 @@ from typing import Any, Dict, List, Optional
 import httpx
 from bs4 import BeautifulSoup
 
-from PySide6.QtCore import (
-    Qt, QObject, Signal, Slot, QRunnable, QThreadPool, QSettings, QStandardPaths
-)
+from PySide6.QtCore import Qt, QObject, Signal, Slot, QRunnable, QThreadPool, QSettings, QStandardPaths
 from PySide6.QtGui import QTextCursor, QAction, QIcon, QPalette, QColor
-from PySide6.QtWidgets import (
-    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QTextEdit,
-    QPlainTextEdit, QLineEdit, QPushButton, QLabel, QFileDialog, QTabWidget,
-    QSplitter, QListWidget, QListWidgetItem, QFormLayout, QComboBox, QSpinBox,
-    QCheckBox, QMessageBox, QProgressBar, QToolBar, QStatusBar
-)
+from PySide6.QtWidgets import QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QTextEdit, QPlainTextEdit, QLineEdit, QPushButton, QLabel, QFileDialog, QTabWidget, QSplitter, QListWidget, QListWidgetItem, QFormLayout, QComboBox, QSpinBox, QCheckBox, QMessageBox, QProgressBar, QToolBar, QStatusBar
 
 # Selenium (runtime import guarded for portability)
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options as ChromeOptions
+from selenium.webdriver.chrome.service import Service as ChromeService
+from webdriver_manager.chrome import ChromeDriverManager
 
 # Optional webdriver-manager (fallback for offline networks)
 try:

@@ -3,6 +3,9 @@ from fastapi.testclient import TestClient
 from unittest.mock import patch, AsyncMock, MagicMock
 import os
 import json
+import time
+import asyncio
+import logging
 
 # Import the main FastAPI app from the orchestrator service
 from services.orchestrator.main import app, REDIS_STREAM, REDIS_GROUP, CONSUMER_NAME, API_KEY
@@ -128,7 +131,7 @@ async def test_process_event_sensor_type(mock_redis_client, mock_neo4j_driver, m
         # Verify TimescaleDB insertion
         mock_psycopg2_connect.return_value.cursor.return_value.execute.assert_any_call(
             "INSERT INTO metrics (time, measurement, value) VALUES (to_timestamp(%s), %s, %s);",
-            (pytest.approx(time.time(), abs=2), "temperature", 25.5) # Use pytest.approx for time
+            (pytest.approx(time.time(), abs=2), "temperature", 25.5)
         )
         mock_psycopg2_connect.return_value.cursor.return_value.execute.assert_any_call(
             "INSERT INTO metrics (time, measurement, value) VALUES (to_timestamp(%s), %s, %s);",
@@ -143,7 +146,7 @@ async def test_process_event_non_sensor_type(mock_redis_client, mock_neo4j_drive
         from services.orchestrator.main import process_event
 
         event_data = {
-            b"type": b""other_event"",
+            b"type": b'"other_event"',
             b"data": b"{\"message\": \"hello\"}"
         }
         await process_event(event_data)
@@ -214,7 +217,7 @@ async def test_process_event_rule_engine_error_logging(mock_neo4j_driver, mock_p
 
         event_data = {
             b"type": b"sensor",
-            b"data": b"{"temperature": 25.5}"
+            b"data": b"{\"temperature\": 25.5}"
         }
         with caplog.at_level(logging.ERROR):
             await process_event(event_data)
@@ -232,7 +235,7 @@ async def test_process_event_neo4j_error_logging(mock_redis_client, mock_psycopg
 
         event_data = {
             b"type": b"sensor",
-            b"data": b"{"temperature": 25.5}"
+            b"data": b"{\"temperature\": 25.5}"
         }
         with caplog.at_level(logging.ERROR):
             await process_event(event_data)
@@ -241,9 +244,10 @@ async def test_process_event_neo4j_error_logging(mock_redis_client, mock_psycopg
 @pytest.mark.asyncio
 async def test_event_listener_processing_error_logging(mock_redis_client, caplog):
     mock_redis_client.xreadgroup.return_value = [
-        [b"events", [[b"123-0", {b"type": b""sensor"", b"data": b"{"}]]] # Malformed JSON to cause error in process_event
+        [b"events", [[b"123-0", {b"type": b"sensor", b"data": b"{\"temp\": 20}"}]]]
     ]
     mock_redis_client.xack = AsyncMock() # Ensure xack is still mocked
+
 
     from services.orchestrator.main import event_listener
 
@@ -252,8 +256,8 @@ async def test_event_listener_processing_error_logging(mock_redis_client, caplog
     task.cancel()
     try:
         await task
-    except asyncio.CancelledError:
-        pass
+        except asyncio.CancelledError:
+            pass
 
     with caplog.at_level(logging.ERROR):
         assert "Error processing event or acknowledging:" in caplog.text
@@ -272,7 +276,7 @@ async def test_event_listener_trim_error_logging(mock_redis_client, caplog):
     try:
         await task
     except asyncio.CancelledError:
-        pass
+            pass
 
     with caplog.at_level(logging.WARNING):
         assert "Error trimming Redis stream: Redis trim error" in caplog.text
@@ -289,7 +293,7 @@ async def test_event_listener_unhandled_error_logging(mock_redis_client, caplog)
     try:
         await task
     except asyncio.CancelledError:
-        pass
+            pass
 
     with caplog.at_level(logging.ERROR):
         assert "Unhandled exception in event listener loop: Unhandled Redis error" in caplog.text
