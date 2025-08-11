@@ -26,34 +26,46 @@ powerful model and persistent storage for the index.
 - `INDEX_PATH`: The path to the directory where the index is persisted 
   (default: `/data/vector_index`).
 - `LOG_LEVEL`: The logging level (e.g., "INFO", "DEBUG").
-"""
 
-"""
-Vector Search Service
----------------------
+Vector Search Service (Refactored)
+----------------------------------
 
-This service provides vector search capabilities using Redis as a vector database.
+This service provides vector search capabilities using Redis as a robust and
+persistent vector database. It uses the `redisvl` library for simplified
+indexing and querying.
 """
 
 import os
 import logging
 from typing import List, Dict, Any
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Security
+from fastapi.security import APIKeyHeader
 from pydantic import BaseModel
 from sentence_transformers import SentenceTransformer
 from redisvl.index import SearchIndex
 from redisvl.query import VectorQuery
+from redis.exceptions import ConnectionError as RedisConnectionError
+
 
 # --- Configuration ---
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
-REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379")
-EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "all-MiniLM-L6-v2")
-INDEX_NAME = os.getenv("VECTOR_INDEX_NAME", "vector-index")
-VECTOR_DIMENSION = 384 # Based on the chosen model
+REDIS_URL = os.getenv("REDIS_URL")
+API_KEY = os.getenv("API_KEY")
+EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL")
+INDEX_NAME = os.getenv("VECTOR_INDEX_NAME", "citadel-vector-index")
 
-logging.basicConfig(level=LOG_LEVEL, format="%(asctime)s | %(levelname)s | %(name)s | %(message)s")
-log = logging.getLogger("vector_search_service")
+# --- Logging ---
+logging.basicConfig(level=LOG_LEVEL, format="%(asctime)s - %(levelname)s - %(message)s")
+logger = logging.getLogger(__name__)
+
+# --- Pre-flight Checks ---
+if not REDIS_URL:
+    raise ValueError("REDIS_URL environment variable is not set.")
+if not API_KEY:
+    raise ValueError("API_KEY environment variable is not set.")
+if not EMBEDDING_MODEL:
+    raise ValueError("EMBEDDING_MODEL environment variable is not set.")
 
 # --- Models ---
 class Document(BaseModel):
@@ -65,41 +77,60 @@ class Query(BaseModel):
     query: str
     top_k: int = 3
 
+# --- Globals ---
+model: SentenceTransformer
+index: SearchIndex
+
 # --- Service Initialization ---
 app = FastAPI(
     title="Vector Search Service",
-    description="Provides vector embedding and search functionality.",
-    version="1.0.0"
+    description="Provides vector embedding and search functionality using Redis.",
+    version="2.0.0"
 )
 
-try:
-    log.info(f"Loading sentence transformer model: {EMBEDDING_MODEL}")
-    model = SentenceTransformer(EMBEDDING_MODEL)
-    log.info("Model loaded successfully.")
-except Exception as e:
-    log.critical(f"Failed to load embedding model: {e}", exc_info=True)
-    raise RuntimeError(f"Model loading failed: {e}")
+@app.on_event("startup")
+def startup_event():
+    """Load model and initialize Redis search index on startup."""
+    global model, index
+    logger.info(f"Loading sentence transformer model: {EMBEDDING_MODEL}")
+    try:
+        model = SentenceTransformer(EMBEDDING_MODEL)
+        logger.info("Model loaded successfully.")
+    except Exception as e:
+        logger.critical(f"Failed to load embedding model: {e}", exc_info=True)
+        raise RuntimeError(f"Model loading failed: {e}")
 
-try:
-    log.info(f"Connecting to Redis at {REDIS_URL} and initializing index '{INDEX_NAME}'")
-    index = SearchIndex.from_yaml("services/vector_search/schema.yaml")
-    index.set_client_from_url(REDIS_URL)
-    index.create(overwrite=True)
-    log.info("Redis index created/connected successfully.")
-except Exception as e:
-    log.critical(f"Failed to connect to Redis or create index: {e}", exc_info=True)
-    raise RuntimeError(f"Redis connection failed: {e}")
+    logger.info(f"Connecting to Redis and initializing index '{INDEX_NAME}'")
+    try:
+        # Assumes a schema.yaml file is present in the same directory
+        index = SearchIndex.from_yaml("schema.yaml")
+        index.set_client_from_url(REDIS_URL)
+        index.create(overwrite=False) # Do not overwrite if index already exists
+        logger.info("Redis index connected/created successfully.")
+    except RedisConnectionError as e:
+        logger.critical(f"Failed to connect to Redis at {REDIS_URL}: {e}", exc_info=True)
+        raise RuntimeError(f"Redis connection failed: {e}")
+    except Exception as e:
+        logger.critical(f"Failed to create Redis index: {e}", exc_info=True)
+        raise RuntimeError(f"Redis index creation failed: {e}")
+
+# --- Security ---
+api_key_header = APIKeyHeader(name="X-API-KEY", auto_error=False)
+
+async def get_api_key(key: str = Security(api_key_header)):
+    if key == API_KEY:
+        return key
+    else:
+        raise HTTPException(status_code=403, detail="Invalid API Key")
 
 # --- API Endpoints ---
 @app.post("/index", summary="Index a list of documents")
-async def index_documents(documents: List[Document]):
-    """
-    Generates embeddings for a list of documents and indexes them in Redis.
-    """
+async def index_documents(documents: List[Document], api_key: str = Security(get_api_key)):
+    """Generates embeddings and indexes documents in Redis."""
     try:
         data_to_load = []
         for doc in documents:
-            vector = model.encode(doc.text).tolist()
+            vector = model.encode(doc.text, convert_to_tensor=False).tolist()
             data_to_load.append({
                 "id": doc.id,
                 "text": doc.text,
@@ -108,19 +139,17 @@ async def index_documents(documents: List[Document]):
             })
         if data_to_load:
             index.load(data_to_load, id_field="id")
-            log.info(f"Successfully indexed {len(data_to_load)} documents.")
+            logger.info(f"Successfully indexed {len(data_to_load)} documents.")
         return {"message": f"Successfully indexed {len(data_to_load)} documents."}
     except Exception as e:
-        log.error(f"Error indexing documents: {e}", exc_info=True)
+        logger.error(f"Error indexing documents: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/search", summary="Search for similar documents")
-async def search(query: Query):
-    """
-    Searches for documents similar to the query text.
-    """
+async def search(query: Query, api_key: str = Security(get_api_key)):
+    """Searches for documents similar to the query text."""
     try:
-        query_embedding = model.encode(query.query).tolist()
+        query_embedding = model.encode(query.query, convert_to_tensor=False).tolist()
         vector_query = VectorQuery(
             vector=query_embedding,
             vector_field_name="vector",
@@ -128,10 +157,10 @@ async def search(query: Query):
             return_fields=["id", "text", "vector_score"]
         )
         results = index.query(vector_query)
-        log.info(f"Search for '{query.query}' returned {len(results)} results.")
+        logger.info(f"Search for '{query.query}' returned {len(results)} results.")
         return {"results": results}
     except Exception as e:
-        log.error(f"Error during search: {e}", exc_info=True)
+        logger.error(f"Error during search: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/health", summary="Health check endpoint")
@@ -140,6 +169,5 @@ async def health_check():
     try:
         index.client.ping()
         return {"status": "ok", "redis_connection": "ok"}
-    except Exception as e:
-        log.error(f"Health check failed: {e}")
-        raise HTTPException(status_code=503, detail="Service Unavailable: Cannot connect to Redis.")
+    except Exception:
+        return {"status": "error", "redis_connection": "failed"}
