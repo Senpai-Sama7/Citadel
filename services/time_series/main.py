@@ -1,3 +1,6 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+
 """
 Time‑Series Analytics Micro‑service
 ----------------------------------
@@ -13,111 +16,112 @@ outside the prediction interval.
 Note: Prophet can take a few seconds to initialise on the first call
 because it compiles a Stan model. In a long‑running service this cost
 is amortised.
+
+Time-Series Analytics Service (Refactored)
+------------------------------------------
+
+This service provides secure endpoints for forecasting and anomaly detection
+using Facebook Prophet. It is configured via environment variables and
+protected by API key authentication.
 """
 
-from __future__ import annotations
-
 import os
-from typing import List, Dict
+import logging
+from typing import List
 
 import pandas as pd
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Security
+from fastapi.security import APIKeyHeader
 from pydantic import BaseModel, Field
 from prophet import Prophet
 
+# --- Configuration ---
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+API_KEY = os.getenv("API_KEY")
 
-app = FastAPI(title="Time Series Service", version="1.0.0")
+# --- Logging ---
+logging.basicConfig(level=LOG_LEVEL, format="%(asctime)s - %(levelname)s - %(message)s")
+logger = logging.getLogger(__name__)
 
-# --- Simple API Key middleware (applies to all routes except health/docs) ---
-API_KEY = os.getenv("API_KEY", "")
-from starlette.responses import JSONResponse
+# --- Pre-flight Checks ---
+if not API_KEY:
+    raise ValueError("API_KEY environment variable is not set.")
 
-@app.middleware("http")
-async def _require_api_key(request, call_next):
-    # allow unauthenticated access to health and docs
-    if request.url.path in {"/health", "/docs", "/openapi.json"} or request.url.path.startswith("/docs"):
-        return await call_next(request)
-    key = request.headers.get("X-API-Key")
-    if not API_KEY or key != API_KEY:
-        return JSONResponse(status_code=403, content={"detail": "Forbidden"})
-    return await call_next(request)
-
-
-
-
+# --- Models ---
 class DataPoint(BaseModel):
     ds: str = Field(..., description="Timestamp in YYYY-MM-DD or ISO format")
     y: float = Field(..., description="Observed value at the timestamp")
 
-
 class ForecastRequest(BaseModel):
     data: List[DataPoint] = Field(..., description="Historical time-series observations")
-    horizon: int = Field(..., description="Number of future steps to forecast", ge=1, le=365)
+    horizon: int = Field(..., description="Number of future steps to forecast", ge=1, le=730)
 
+# --- Service Initialization ---
+app = FastAPI(
+    title="Time Series Service",
+    description="Provides forecasting and anomaly detection for time-series data.",
+    version="2.0.0"
+)
 
+# --- Security ---
+api_key_header = APIKeyHeader(name="X-API-KEY", auto_error=False)
+
+async def get_api_key(key: str = Security(api_key_header)):
+    if key == API_KEY:
+        return key
+    else:
+        raise HTTPException(status_code=403, detail="Invalid API Key")
+
+# --- Helper Function ---
 def _prepare_dataframe(points: List[DataPoint]) -> pd.DataFrame:
-    df = pd.DataFrame([p.model_dump() for p in points])
-    # Prophet expects columns named 'ds' and 'y' with ds as datetime
     try:
+        df = pd.DataFrame([p.dict() for p in points])
         df['ds'] = pd.to_datetime(df['ds'])
-    except Exception as exc:
-        raise HTTPException(status_code=400, detail=f"Invalid datetime format: {exc}")
-    return df
+        return df
+    except Exception as e:
+        logger.error(f"Error preparing dataframe: {e}", exc_info=True)
+        raise HTTPException(status_code=400, detail=f"Invalid data or datetime format: {e}")
 
-
+# --- API Endpoints ---
 @app.post("/forecast", summary="Forecast time series")
-def forecast(req: ForecastRequest):
+def forecast(req: ForecastRequest, api_key: str = Security(get_api_key)):
     if not req.data:
-        raise HTTPException(status_code=400, detail="Input data is empty")
+        raise HTTPException(status_code=400, detail="Input data cannot be empty.")
+    
     df = _prepare_dataframe(req.data)
-    # Initialise and fit the model. Using daily seasonality by default.
-    m = Prophet(interval_width=0.95)
+    model = Prophet(interval_width=0.95)
+    
     try:
-        m.fit(df)
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Model fitting failed: {exc}")
-    future = m.make_future_dataframe(periods=req.horizon)
-    forecast = m.predict(future)
-    result = [
-        {
-            "ds": row['ds'].strftime("%Y-%m-%d"),
-            "yhat": float(row['yhat']),
-            "yhat_lower": float(row['yhat_lower']),
-            "yhat_upper": float(row['yhat_upper']),
-        }
-        for _, row in forecast.iterrows()
-    ]
-    return {"forecast": result}
-
+        model.fit(df)
+        future = model.make_future_dataframe(periods=req.horizon)
+        forecast_df = model.predict(future)
+        result = forecast_df[['ds', 'yhat', 'yhat_lower', 'yhat_upper']].to_dict(orient='records')
+        return {"forecast": result}
+    except Exception as e:
+        logger.error(f"Error during forecasting: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Model fitting or prediction failed: {e}")
 
 @app.post("/anomaly", summary="Detect anomalies")
-def anomaly(req: ForecastRequest):
+def anomaly_detection(req: ForecastRequest, api_key: str = Security(get_api_key)):
     if not req.data:
-        raise HTTPException(status_code=400, detail="Input data is empty")
+        raise HTTPException(status_code=400, detail="Input data cannot be empty.")
+        
     df = _prepare_dataframe(req.data)
-    m = Prophet(interval_width=0.95)
+    model = Prophet(interval_width=0.99) # Wider interval for anomaly detection
+    
     try:
-        m.fit(df)
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Model fitting failed: {exc}")
-    forecast = m.predict(df[['ds']])
-    merged = df.copy()
-    merged['yhat_lower'] = forecast['yhat_lower']
-    merged['yhat_upper'] = forecast['yhat_upper']
-    merged['anomaly'] = (merged['y'] < merged['yhat_lower']) | (merged['y'] > merged['yhat_upper'])
-    results = [
-        {
-            "ds": row['ds'].strftime("%Y-%m-%d"),
-            "y": float(row['y']),
-            "yhat_lower": float(row['yhat_lower']),
-            "yhat_upper": float(row['yhat_upper']),
-            "anomaly": bool(row['anomaly']),
-        }
-        for _, row in merged.iterrows()
-    ]
-    return {"anomalies": results}
+        model.fit(df)
+        forecast_df = model.predict(df)
+        result_df = pd.concat([df.set_index('ds')['y'], forecast_df.set_index('ds')[['yhat_lower', 'yhat_upper']]], axis=1)
+        result_df['anomaly'] = (result_df['y'] < result_df['yhat_lower']) | (result_df['y'] > result_df['yhat_upper'])
+        
+        anomalies = result_df[result_df['anomaly']].reset_index().to_dict(orient='records')
+        return {"anomalies": anomalies}
+    except Exception as e:
+        logger.error(f"Error during anomaly detection: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Model fitting or prediction failed: {e}")
 
-
-@app.get("/health", summary="Health check")
+@app.get("/health", summary="Health check endpoint")
 def health():
+    """Provides a basic health check of the service."""
     return {"status": "ok"}
