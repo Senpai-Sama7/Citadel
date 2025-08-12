@@ -35,6 +35,42 @@ Citadel is a modular collection of Python microservices and tools for building A
 
 ## Development
 
+### Setup
+Before you begin, ensure you have Docker and Python installed.
+
+1. **Create Environment File:** This project uses environment variables for configuration. Copy the example file to create your own local configuration:
+
+    ```bash
+    cp .env.example .env
+    ```
+
+    You may need to update the values in `.env` if needed.
+
+2. **Start Services:** The project's infrastructure (Redis, Neo4j, etc.) is managed by Docker Compose. Start them in the background:
+
+    ```bash
+    docker compose up -d
+    ```
+
+3. **Install Dependencies:** Install the required Python packages:
+
+    ```bash
+    pip install -r requirements-dev.txt
+    ```
+
+### Linting
+This project uses `pre-commit` for linting. Install the hooks and run them on all files:
+
+```bash
+pre-commit install
+pre-commit run --all-files
+```
+
+### Testing
+Once the services are running and dependencies are installed, run the test suite:
+
+```bash
+pytest
 ### Running Tests
 The test suite exercises the major services. Running it requires dependencies such as Redis, Neo4j and the DoWhy library:
 
