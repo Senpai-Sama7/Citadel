@@ -38,13 +38,21 @@ Citadel is a modular collection of Python microservices and tools for building A
 ### Setup
 Before you begin, ensure you have Docker and Python installed.
 
-1. **Start Services:** The project's infrastructure (Redis, Neo4j, etc.) is managed by Docker Compose. Start them in the background:
+1. **Create Environment File:** This project uses environment variables for configuration. Copy the example file to create your own local configuration:
 
     ```bash
-    docker-compose up -d
+    cp .env.example .env
     ```
 
-2. **Install Dependencies:** Install the required Python packages:
+    You may need to update the values in `.env` if needed.
+
+2. **Start Services:** The project's infrastructure (Redis, Neo4j, etc.) is managed by Docker Compose. Start them in the background:
+
+    ```bash
+    docker compose up -d
+    ```
+
+3. **Install Dependencies:** Install the required Python packages:
 
     ```bash
     pip install -r requirements-dev.txt
