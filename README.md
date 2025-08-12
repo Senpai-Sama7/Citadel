@@ -63,7 +63,20 @@ Once the services are running and dependencies are installed, run the test suite
 
 ```bash
 pytest
+### Running Tests
+The test suite exercises the major services. Running it requires dependencies such as Redis, Neo4j and the DoWhy library:
+
+```bash
+pytest
+```
+
+### Linting
+Run the configured pre‑commit hooks before committing changes:
+
+```bash
+pre-commit run --files README.md
 ```
 
 ## Environment
 Configuration is supplied through environment variables; an example is provided in `.env.example`.
+
