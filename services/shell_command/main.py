@@ -19,6 +19,15 @@ from pydantic import BaseModel
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 API_KEY = os.getenv("API_KEY")
 
+# --- Command Allowlist ---
+# Map logical command names to the actual shell commands to run.
+# You can expand this list as needed.
+ALLOWED_COMMANDS = {
+    "list_files": ["ls", "-l"],
+    "disk_usage": ["df", "-h"],
+    "uptime": ["uptime"],
+}
+
 # --- Logging ---
 logging.basicConfig(level=LOG_LEVEL, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -29,7 +38,7 @@ if not API_KEY:
 
 # --- Models ---
 class ShellCommand(BaseModel):
-    command: str
+    command: str  # logical command name, not raw shell command
 
 # --- Service Initialization ---
 app = FastAPI(
@@ -51,11 +60,15 @@ async def get_api_key(key: str = Security(api_key_header)):
 @app.post("/execute", summary="Execute a shell command")
 def execute_shell_command(cmd: ShellCommand, api_key: str = Security(get_api_key)):
     """
-    Executes a shell command and returns the output.
+    Executes an allowed shell command specified by logical name and returns the output.
     """
+    # Check if the requested command is allowed
+    command_to_run = ALLOWED_COMMANDS.get(cmd.command)
+    if not command_to_run:
+        raise HTTPException(status_code=400, detail=f"Command '{cmd.command}' not allowed.")
     try:
         result = subprocess.run(
-            cmd.command, shell=True, capture_output=True, text=True, check=True, timeout=120
+            command_to_run, shell=False, capture_output=True, text=True, check=True, timeout=120
         )
         return {"stdout": result.stdout, "stderr": result.stderr}
     except subprocess.CalledProcessError as e:
