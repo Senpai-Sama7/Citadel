@@ -154,7 +154,7 @@ python-dateutil==2.9.0.post0
 python-dotenv==1.1.1
 python-jose==3.5.0
 python-magic==0.4.27
-python-multipart==0.0.20
+python-multipart==0.0.22
 python-ulid==3.0.0
 pyyaml==6.0.2
 redis==6.4.0
