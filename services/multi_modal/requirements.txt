@@ -11,18 +11,18 @@ anyio==4.10.0
 click==8.2.1
     # via uvicorn
 fastapi==0.116.1
-    # via -r services/multi_modal/requirements.in
+    # via -r requirements.in
 h11==0.16.0
     # via uvicorn
 idna==3.10
     # via anyio
 numpy==2.3.2
-    # via -r services/multi_modal/requirements.in
-pillow==11.3.0
-    # via -r services/multi_modal/requirements.in
+    # via -r requirements.in
+pillow==12.1.1
+    # via -r requirements.in
 pydantic==2.11.7
     # via
-    #   -r services/multi_modal/requirements.in
+    #   -r requirements.in
     #   fastapi
 pydantic-core==2.33.2
     # via pydantic
@@ -41,4 +41,4 @@ typing-extensions==4.14.1
 typing-inspection==0.4.1
     # via pydantic
 uvicorn==0.35.0
-    # via -r services/multi_modal/requirements.in
+    # via -r requirements.in
